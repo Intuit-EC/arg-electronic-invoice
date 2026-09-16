@@ -1,5 +1,19 @@
 import Joi from 'joi';
 
+const optionalString = Joi.string().allow('').default('');
+
+const requiredInProductionUri = Joi.alternatives().conditional('NODE_ENV', {
+  is: 'production',
+  then: Joi.string().uri().required(),
+  otherwise: optionalString,
+});
+
+const requiredInProductionSecret = Joi.alternatives().conditional('NODE_ENV', {
+  is: 'production',
+  then: Joi.string().min(32).required(),
+  otherwise: optionalString,
+});
+
 export const validationSchema = Joi.object({
   // Application
   NODE_ENV: Joi.string()
@@ -27,6 +41,11 @@ export const validationSchema = Joi.object({
     .default(
       'https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl',
     ),
+  SRI_USE_MOCK: Joi.alternatives().conditional('NODE_ENV', {
+    is: 'production',
+    then: Joi.boolean().valid(false).required(),
+    otherwise: Joi.boolean().default(false),
+  }),
 
   // Digital Signature
   SIGNATURE_PATH: Joi.string().default('./certificates/signature.p12'),
@@ -63,4 +82,38 @@ export const validationSchema = Joi.object({
   LOG_LEVEL: Joi.string()
     .valid('error', 'warn', 'info', 'debug')
     .default('info'),
+
+  // Background jobs
+  JOBS_BATCH_SIZE: Joi.number().integer().min(1).max(100).default(10),
+  JOBS_LEASE_SECONDS: Joi.number().integer().min(120).default(300),
+  JOBS_RETRY_BASE_SECONDS: Joi.number().integer().min(1).default(30),
+  JOBS_RETRY_MAX_SECONDS: Joi.number().integer().min(30).default(900),
+  CALLBACK_RETRY_MAX_SECONDS: Joi.number().integer().min(30).default(3600),
+  PUBLIC_API_URL: requiredInProductionUri,
+  ZENNTRAL_API_KEY: requiredInProductionSecret,
+  FACTURACION_BCA_API_KEY: Joi.alternatives().conditional('NODE_ENV', {
+    is: 'production',
+    then: Joi.string()
+      .min(32)
+      .invalid(Joi.ref('ZENNTRAL_API_KEY'))
+      .required()
+      .messages({
+        'any.invalid':
+          'FACTURACION_BCA_API_KEY debe ser diferente de ZENNTRAL_API_KEY',
+      }),
+    otherwise: optionalString,
+  }),
+  ZENNTRAL_WEBHOOK_SECRET: requiredInProductionSecret,
+  FACTURACION_BCA_WEBHOOK_SECRET: Joi.alternatives().conditional('NODE_ENV', {
+    is: 'production',
+    then: Joi.string()
+      .min(32)
+      .invalid(Joi.ref('ZENNTRAL_WEBHOOK_SECRET'))
+      .required()
+      .messages({
+        'any.invalid':
+          'FACTURACION_BCA_WEBHOOK_SECRET debe ser diferente de ZENNTRAL_WEBHOOK_SECRET',
+      }),
+    otherwise: optionalString,
+  }),
 });

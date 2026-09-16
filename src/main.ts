@@ -62,7 +62,9 @@ async function bootstrap() {
     .addTag('Retenciones', 'Endpoints para gestión de retenciones')
     .addTag('Guías de Remisión', 'Endpoints para gestión de guías de remisión')
     .addTag('SRI', 'Endpoints para integración con SRI')
+    .addTag('Jobs', 'Cola asíncrona de emisión electrónica')
     .addBearerAuth()
+    .addApiKey({ type: 'apiKey', name: 'X-Api-Key', in: 'header' }, 'x-api-key')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

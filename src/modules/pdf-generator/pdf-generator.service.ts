@@ -56,7 +56,7 @@ export class PdfGeneratorService {
 
   async generateRideFromXml(
     xmlContent: string,
-    authData?: { numeroAutorizacion?: string; fechaAutorizacion?: Date }
+    authData?: { numeroAutorizacion?: string; fechaAutorizacion?: Date },
   ): Promise<Buffer> {
     try {
       const parser = new XMLParser({
@@ -71,7 +71,9 @@ export class PdfGeneratorService {
 
       let invoiceData;
       let numeroAutorizacion = authData?.numeroAutorizacion || '';
-      let fechaAutorizacion = authData?.fechaAutorizacion ? authData.fechaAutorizacion.toLocaleString('es-EC') : '';
+      let fechaAutorizacion = authData?.fechaAutorizacion
+        ? authData.fechaAutorizacion.toLocaleString('es-EC')
+        : '';
 
       if (parsedXml.autorizacion && parsedXml.autorizacion.comprobante) {
         // Es un XML de autorización del SRI
@@ -94,7 +96,7 @@ export class PdfGeneratorService {
       }
 
       // Preprocesamiento de subtotales dinámicos
-      let subtotales = {
+      const subtotales = {
         subtotal15: '0.00',
         subtotal12: '0.00',
         subtotal0: '0.00',
@@ -103,28 +105,36 @@ export class PdfGeneratorService {
         iva15: '0.00',
         iva12: '0.00',
       };
-      
-      const impuestos = invoiceData.infoFactura?.totalConImpuestos?.totalImpuesto;
-      const impuestosArray = Array.isArray(impuestos) ? impuestos : (impuestos ? [impuestos] : []);
-      
+
+      const impuestos =
+        invoiceData.infoFactura?.totalConImpuestos?.totalImpuesto;
+      const impuestosArray = Array.isArray(impuestos)
+        ? impuestos
+        : impuestos
+          ? [impuestos]
+          : [];
+
       for (const imp of impuestosArray) {
         if (imp.codigo == '2' || imp.codigo == 2) {
-          if (imp.codigoPorcentaje == '0' || imp.codigoPorcentaje == 0) subtotales.subtotal0 = Number(imp.baseImponible).toFixed(2);
+          if (imp.codigoPorcentaje == '0' || imp.codigoPorcentaje == 0)
+            subtotales.subtotal0 = Number(imp.baseImponible).toFixed(2);
           if (imp.codigoPorcentaje == '2' || imp.codigoPorcentaje == 2) {
-             subtotales.subtotal12 = Number(imp.baseImponible).toFixed(2);
-             subtotales.iva12 = Number(imp.valor).toFixed(2);
+            subtotales.subtotal12 = Number(imp.baseImponible).toFixed(2);
+            subtotales.iva12 = Number(imp.valor).toFixed(2);
           }
           if (imp.codigoPorcentaje == '4' || imp.codigoPorcentaje == 4) {
-             subtotales.subtotal15 = Number(imp.baseImponible).toFixed(2);
-             subtotales.iva15 = Number(imp.valor).toFixed(2);
+            subtotales.subtotal15 = Number(imp.baseImponible).toFixed(2);
+            subtotales.iva15 = Number(imp.valor).toFixed(2);
           }
-          if (imp.codigoPorcentaje == '6' || imp.codigoPorcentaje == 6) subtotales.subtotalNoObjeto = Number(imp.baseImponible).toFixed(2);
-          if (imp.codigoPorcentaje == '7' || imp.codigoPorcentaje == 7) subtotales.subtotalExento = Number(imp.baseImponible).toFixed(2);
+          if (imp.codigoPorcentaje == '6' || imp.codigoPorcentaje == 6)
+            subtotales.subtotalNoObjeto = Number(imp.baseImponible).toFixed(2);
+          if (imp.codigoPorcentaje == '7' || imp.codigoPorcentaje == 7)
+            subtotales.subtotalExento = Number(imp.baseImponible).toFixed(2);
         }
       }
 
       // Código de barras de clave de acceso
-      const barcodeImage = invoiceData.infoTributaria?.claveAcceso 
+      const barcodeImage = invoiceData.infoTributaria?.claveAcceso
         ? this.generateBarcodeBase64(invoiceData.infoTributaria.claveAcceso)
         : null;
 
@@ -161,7 +171,7 @@ export class PdfGeneratorService {
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
-          '--no-sandbox', 
+          '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage', // Útil para Docker (evita crash por memoria)
         ],

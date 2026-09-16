@@ -34,7 +34,7 @@ import {
 } from './dto';
 import { XmlBuilderService } from '../xml-builder/xml-builder.service';
 import { SignatureService } from '../signature/signature.service';
-import { SriService } from '../sri/sri.service';
+import { SriAuthorizationResponse, SriService } from '../sri/sri.service';
 import { StorageService } from '../storage/storage.service';
 import {
   generateAccessKey,
@@ -51,6 +51,21 @@ import {
   TipoEmision,
 } from '../../shared/constants/sri.constants';
 import { PdfGeneratorService } from '../pdf-generator/pdf-generator.service';
+import {
+  SignatureConfigurationError,
+  SriDefinitiveRejectionError,
+  SriDomainError,
+  SriTemporaryError,
+} from '../../shared/errors/sri.errors';
+
+export interface EnqueuedInvoiceResult {
+  outcome: 'AUTHORIZED' | 'PENDING' | 'REJECTED';
+  invoice: IssueInvoiceResponseDto;
+  authorization?: {
+    number: string;
+    authorizedAt: Date;
+  };
+}
 
 @Injectable()
 export class InvoiceService {
@@ -96,29 +111,56 @@ export class InvoiceService {
   async issue(
     issueInvoiceDto: IssueInvoiceDto,
   ): Promise<IssueInvoiceResponseDto> {
+    return (await this.processEnqueuedInvoice(issueInvoiceDto)).invoice;
+  }
+
+  async processEnqueuedInvoice(
+    issueInvoiceDto: IssueInvoiceDto,
+  ): Promise<EnqueuedInvoiceResult> {
     const existingInvoice = await this.findOneEntityByClaveAcceso(
       issueInvoiceDto.claveAcceso,
     );
+
+    let processedInvoice: Invoice;
 
     if (existingInvoice) {
       this.logger.log(
         `Invoice issue request is idempotent. Reusing invoice ${existingInvoice.id} for claveAcceso ${issueInvoiceDto.claveAcceso}`,
       );
-
-      const resumedInvoice = await this.resumeIssueFlow(existingInvoice);
-      return this.mapIssueResponseDto(resumedInvoice);
+      processedInvoice = await this.resumeIssueFlow(existingInvoice);
+    } else {
+      const invoice = await this.createInvoiceRecord(
+        issueInvoiceDto,
+        issueInvoiceDto.establecimiento,
+        issueInvoiceDto.puntoEmision,
+        issueInvoiceDto.secuencial,
+        issueInvoiceDto.claveAcceso,
+      );
+      processedInvoice = await this.processAuthorizationFlow(invoice);
     }
 
-    const invoice = await this.createInvoiceRecord(
-      issueInvoiceDto,
-      issueInvoiceDto.establecimiento,
-      issueInvoiceDto.puntoEmision,
-      issueInvoiceDto.secuencial,
-      issueInvoiceDto.claveAcceso,
-    );
+    const response = this.mapIssueResponseDto(processedInvoice);
 
-    const processedInvoice = await this.processAuthorizationFlow(invoice);
-    return this.mapIssueResponseDto(processedInvoice);
+    if (
+      processedInvoice.status === InvoiceStatus.AUTHORIZED &&
+      processedInvoice.authorizationNumber &&
+      processedInvoice.authorizedAt
+    ) {
+      return {
+        outcome: 'AUTHORIZED',
+        invoice: response,
+        authorization: {
+          number: processedInvoice.authorizationNumber,
+          authorizedAt: processedInvoice.authorizedAt,
+        },
+      };
+    }
+
+    if (processedInvoice.status === InvoiceStatus.NOT_AUTHORIZED) {
+      return { outcome: 'REJECTED', invoice: response };
+    }
+
+    return { outcome: 'PENDING', invoice: response };
   }
 
   /**
@@ -212,11 +254,15 @@ export class InvoiceService {
         );
       }
 
-      const invoice = await this.invoiceRepository.findOne({ where: { id: invoiceId } });
+      const invoice = await this.invoiceRepository.findOne({
+        where: { id: invoiceId },
+      });
 
       let xmlContent = xmlArtifact.content;
       if (!xmlContent && xmlArtifact.storageKey) {
-        const fileBuffer = await this.storageService.get(xmlArtifact.storageKey);
+        const fileBuffer = await this.storageService.get(
+          xmlArtifact.storageKey,
+        );
         xmlContent = fileBuffer.toString('utf8');
       }
 
@@ -231,7 +277,7 @@ export class InvoiceService {
         {
           numeroAutorizacion: invoice?.authorizationNumber,
           fechaAutorizacion: invoice?.authorizedAt,
-        }
+        },
       );
 
       return {
@@ -332,85 +378,9 @@ export class InvoiceService {
       throw new BadRequestException('La factura no tiene clave de acceso');
     }
 
-    try {
-      invoice.sriAuthorizationStatus = SriAuthorizationStatus.PENDING;
-      await this.invoiceRepository.save(invoice);
-
-      const authResponse = await this.sriService.checkAuthorization(
-        invoice.claveAcceso,
-      );
-
-      await this.saveArtifact(
-        invoice.id,
-        ArtifactType.RESPONSE_AUTH,
-        JSON.stringify(authResponse),
-        'application/json',
-      );
-
-      if (authResponse.estado === 'AUTORIZADO') {
-        invoice.status = InvoiceStatus.AUTHORIZED;
-        invoice.sriAuthorizationStatus = SriAuthorizationStatus.AUTORIZADO;
-        invoice.authorizationNumber = authResponse.numeroAutorizacion;
-        invoice.authorizedAt = new Date();
-
-        // Guardar XML autorizado
-        if (authResponse.comprobante) {
-          await this.saveArtifact(
-            invoice.id,
-            ArtifactType.XML_AUTHORIZED,
-            authResponse.comprobante,
-            'application/xml',
-          );
-        }
-
-        await this.createEvent(
-          invoice.id,
-          InvoiceEventType.AUTHORIZED,
-          'Factura autorizada por el SRI',
-          { authorizationNumber: authResponse.numeroAutorizacion },
-        );
-      } else if (authResponse.estado === 'NO AUTORIZADO') {
-        invoice.status = InvoiceStatus.NOT_AUTHORIZED;
-        invoice.sriAuthorizationStatus = SriAuthorizationStatus.NO_AUTORIZADO;
-
-        // Extraer mensaje de error desde el array mensajes
-        let errorMessage = 'No autorizada por el SRI';
-        const mensajes = authResponse.mensajes;
-        if (Array.isArray(mensajes) && mensajes.length > 0) {
-          errorMessage = mensajes
-            .map((m: any) => {
-              let msg = `[${m.identificador}] ${m.mensaje}`;
-              if (m.informacionAdicional) msg += ` - ${m.informacionAdicional}`;
-              return msg;
-            })
-            .join(' | ');
-        } else if (authResponse.mensaje) {
-          errorMessage = authResponse.mensaje;
-        }
-
-        invoice.lastError = errorMessage;
-
-        await this.createEvent(
-          invoice.id,
-          InvoiceEventType.NOT_AUTHORIZED,
-          `No autorizada: ${errorMessage}`,
-        );
-      } else if (authResponse.estado === 'EN PROCESO') {
-        invoice.sriAuthorizationStatus =
-          SriAuthorizationStatus.EN_PROCESAMIENTO;
-      }
-
-      await this.invoiceRepository.save(invoice);
-
-      return this.mapToResponseDto(invoice);
-    } catch (error) {
-      this.logger.error(
-        `Error checking authorization for invoice ${id}: ${error.message}`,
-      );
-      throw new InternalServerErrorException(
-        `Error al consultar autorización: ${error.message}`,
-      );
-    }
+    const { invoice: updatedInvoice } =
+      await this.checkAndPersistAuthorization(invoice);
+    return this.mapToResponseDto(updatedInvoice);
   }
 
   /**
@@ -716,7 +686,9 @@ export class InvoiceService {
       storageKey: null,
       content: null,
     };
-    this.logger.debug(`Saving artifact for invoice ${invoiceId}, type ${type}, size ${artifactData.size} bytes, hash ${artifactData.hashSha256}`);
+    this.logger.debug(
+      `Saving artifact for invoice ${invoiceId}, type ${type}, size ${artifactData.size} bytes, hash ${artifactData.hashSha256}`,
+    );
     // Lógica de almacenamiento:
     // - XMLs y JSONs: guardar en DB (columna content)
     // - PDFs: guardar en Cloud Storage (columna storageKey)
@@ -730,7 +702,9 @@ export class InvoiceService {
       artifactData.content = content;
       // No usar filesystem para XMLs/JSONs
     }
-    console.log(`Saving artifact for invoice ${invoiceId}, type ${type}, size ${artifactData.size} bytes, hash ${artifactData.hashSha256}`);
+    console.log(
+      `Saving artifact for invoice ${invoiceId}, type ${type}, size ${artifactData.size} bytes, hash ${artifactData.hashSha256}`,
+    );
     await this.artifactRepository.upsert(artifactData, ['invoiceId', 'type']);
   }
 
@@ -796,6 +770,105 @@ export class InvoiceService {
     });
   }
 
+  private async checkAndPersistAuthorization(invoice: Invoice): Promise<{
+    invoice: Invoice;
+    response: SriAuthorizationResponse;
+  }> {
+    const previousStatus = invoice.status;
+    invoice.sriAuthorizationStatus = SriAuthorizationStatus.PENDING;
+    await this.invoiceRepository.save(invoice);
+
+    const response = await this.sriService.checkAuthorization(
+      invoice.claveAcceso,
+    );
+
+    await this.saveArtifact(
+      invoice.id,
+      ArtifactType.RESPONSE_AUTH,
+      JSON.stringify(response),
+      'application/json',
+    );
+
+    if (response.estado === 'AUTORIZADO') {
+      if (!response.numeroAutorizacion) {
+        throw new SriTemporaryError(
+          'El SRI respondió AUTORIZADO sin número de autorización',
+          'SRI_AUTHORIZATION_INCOMPLETE',
+        );
+      }
+
+      invoice.status = InvoiceStatus.AUTHORIZED;
+      invoice.sriAuthorizationStatus = SriAuthorizationStatus.AUTORIZADO;
+      invoice.authorizationNumber = response.numeroAutorizacion;
+      invoice.authorizedAt = this.parseAuthorizationDate(
+        response.fechaAutorizacion,
+      );
+      invoice.lastError = null;
+
+      if (response.comprobante) {
+        await this.saveArtifact(
+          invoice.id,
+          ArtifactType.XML_AUTHORIZED,
+          response.comprobante,
+          'application/xml',
+        );
+      }
+
+      if (previousStatus !== InvoiceStatus.AUTHORIZED) {
+        await this.createEvent(
+          invoice.id,
+          InvoiceEventType.AUTHORIZED,
+          'Factura autorizada por el SRI',
+          { authorizationNumber: response.numeroAutorizacion },
+        );
+      }
+    } else if (response.estado === 'NO AUTORIZADO') {
+      invoice.status = InvoiceStatus.NOT_AUTHORIZED;
+      invoice.sriAuthorizationStatus = SriAuthorizationStatus.NO_AUTORIZADO;
+      invoice.lastError = this.formatSriMessages(
+        response.mensajes,
+        'No autorizada por el SRI',
+      );
+
+      if (previousStatus !== InvoiceStatus.NOT_AUTHORIZED) {
+        await this.createEvent(
+          invoice.id,
+          InvoiceEventType.NOT_AUTHORIZED,
+          `No autorizada: ${invoice.lastError}`,
+        );
+      }
+    } else if (response.estado === 'EN PROCESO') {
+      invoice.sriAuthorizationStatus = SriAuthorizationStatus.EN_PROCESAMIENTO;
+    } else {
+      invoice.sriAuthorizationStatus = SriAuthorizationStatus.PENDING;
+    }
+
+    await this.invoiceRepository.save(invoice);
+    return { invoice: await this.findOneEntity(invoice.id), response };
+  }
+
+  private parseAuthorizationDate(value: string | null): Date {
+    if (!value) return new Date();
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  }
+
+  private formatSriMessages(
+    messages: SriAuthorizationResponse['mensajes'],
+    fallback: string,
+  ): string {
+    if (!messages.length) return fallback;
+
+    return messages
+      .map((message) => {
+        const additional = message.informacionAdicional
+          ? ` - ${message.informacionAdicional}`
+          : '';
+        return `[${message.identificador}] ${message.mensaje}${additional}`;
+      })
+      .join(' | ');
+  }
+
   private async processAuthorizationFlow(invoice: Invoice): Promise<Invoice> {
     this.validateInvoiceEntityTotals(invoice);
 
@@ -805,47 +878,62 @@ export class InvoiceService {
         await this.invoiceRepository.save(invoice);
       }
 
+      const preflight = await this.checkAndPersistAuthorization(invoice);
+      invoice = preflight.invoice;
+
+      if (
+        preflight.response.estado === 'AUTORIZADO' ||
+        preflight.response.estado === 'NO AUTORIZADO' ||
+        preflight.response.estado === 'EN PROCESO'
+      ) {
+        return invoice;
+      }
+
+      if (invoice.sriReceptionStatus === SriReceptionStatus.RECEIVED) {
+        return invoice;
+      }
+
       const xmlUnsigned =
-        (await this.getArtifactContent(invoice.id, ArtifactType.XML_UNSIGNED)) ||
-        (await this.generateAndPersistUnsignedXml(invoice));
+        (await this.getArtifactContent(
+          invoice.id,
+          ArtifactType.XML_UNSIGNED,
+        )) || (await this.generateAndPersistUnsignedXml(invoice));
 
       const xmlSigned =
         (await this.getArtifactContent(invoice.id, ArtifactType.XML_SIGNED)) ||
         (await this.signAndPersistXml(invoice, xmlUnsigned));
 
-      if (invoice.sriReceptionStatus !== SriReceptionStatus.RECEIVED) {
-        const receptionAccepted = await this.sendSignedXmlToSri(invoice, xmlSigned);
-
-        if (!receptionAccepted) {
-          return this.findOneEntity(invoice.id);
-        }
-      }
+      await this.sendSignedXmlToSri(invoice, xmlSigned);
 
       if (
         invoice.status !== InvoiceStatus.AUTHORIZED &&
         invoice.sriAuthorizationStatus !== SriAuthorizationStatus.AUTORIZADO
       ) {
-        await this.checkAuthorization(invoice.id);
+        await this.checkAndPersistAuthorization(invoice);
       }
 
       return this.findOneEntity(invoice.id);
-    } catch (error) {
-      this.logger.error(`Error authorizing invoice ${invoice.id}: ${error.message}`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Error authorizing invoice ${invoice.id}: ${message}`);
 
       invoice.status = InvoiceStatus.ERROR;
-      invoice.lastError = error.message;
+      invoice.lastError = message;
       invoice.retryCount += 1;
       await this.invoiceRepository.save(invoice);
 
       await this.createEvent(
         invoice.id,
         InvoiceEventType.ERROR,
-        `Error: ${error.message}`,
-        { error: error.stack },
+        `Error: ${message}`,
+        { error: error instanceof Error ? error.stack : undefined },
       );
 
-      throw new InternalServerErrorException(
-        `Error al autorizar factura: ${error.message}`,
+      if (error instanceof SriDomainError) throw error;
+      throw new SriTemporaryError(
+        `Error inesperado al autorizar factura: ${message}`,
+        'INVOICE_PROCESSING_ERROR',
+        { cause: error },
       );
     }
   }
@@ -869,8 +957,20 @@ export class InvoiceService {
     return this.processAuthorizationFlow(invoice);
   }
 
-  private async generateAndPersistUnsignedXml(invoice: Invoice): Promise<string> {
-    const xmlUnsigned = this.generateXml(invoice);
+  private async generateAndPersistUnsignedXml(
+    invoice: Invoice,
+  ): Promise<string> {
+    let xmlUnsigned: string;
+    try {
+      xmlUnsigned = this.generateXml(invoice);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SriDefinitiveRejectionError(
+        `No fue posible construir un XML fiscal válido: ${message}`,
+        'INVOICE_XML_INVALID',
+        { cause: error },
+      );
+    }
     this.logger.debug(
       `XML sin firmar generado para invoice ${invoice.id} (${Buffer.byteLength(xmlUnsigned, 'utf8')} bytes)`,
     );
@@ -881,7 +981,7 @@ export class InvoiceService {
       xmlUnsigned,
       'application/xml',
     );
-    
+
     if (invoice.status === InvoiceStatus.DRAFT) {
       invoice.status = InvoiceStatus.PENDING_SIGNATURE;
       invoice.lastError = null;
@@ -895,11 +995,21 @@ export class InvoiceService {
     invoice: Invoice,
     xmlUnsigned: string,
   ): Promise<string> {
-    const xmlSigned = await this.signatureService.signXml(
-      xmlUnsigned,
-      invoice.issuer.certP12Path,
-      invoice.issuer.certPasswordEncrypted,
-    );
+    let xmlSigned: string;
+    try {
+      xmlSigned = await this.signatureService.signXml(
+        xmlUnsigned,
+        invoice.issuer.certP12Path,
+        invoice.issuer.certPasswordEncrypted,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new SignatureConfigurationError(
+        `No fue posible firmar la factura: ${message}`,
+        'SIGNATURE_FAILED',
+        { cause: error },
+      );
+    }
 
     this.logger.debug(
       `XML firmado generado para invoice ${invoice.id} (${Buffer.byteLength(xmlSigned, 'utf8')} bytes)`,
@@ -915,7 +1025,11 @@ export class InvoiceService {
     invoice.status = InvoiceStatus.SIGNED;
     invoice.lastError = null;
     await this.invoiceRepository.save(invoice);
-    await this.createEvent(invoice.id, InvoiceEventType.SIGNED, 'Factura firmada');
+    await this.createEvent(
+      invoice.id,
+      InvoiceEventType.SIGNED,
+      'Factura firmada',
+    );
 
     return xmlSigned;
   }
@@ -923,7 +1037,7 @@ export class InvoiceService {
   private async sendSignedXmlToSri(
     invoice: Invoice,
     xmlSigned: string,
-  ): Promise<boolean> {
+  ): Promise<void> {
     invoice.status = InvoiceStatus.SENDING;
     invoice.sriReceptionStatus = SriReceptionStatus.PENDING;
     await this.invoiceRepository.save(invoice);
@@ -949,7 +1063,7 @@ export class InvoiceService {
         InvoiceEventType.RECEIVED,
         'Recibida por el SRI',
       );
-      return true;
+      return;
     }
 
     let errorMessage = 'Error desconocido en recepción';
@@ -977,7 +1091,10 @@ export class InvoiceService {
       `Error en recepción: ${errorMessage}`,
     );
 
-    return false;
+    throw new SriDefinitiveRejectionError(
+      errorMessage,
+      'SRI_RECEPTION_REJECTED',
+    );
   }
 
   private async getArtifactContent(

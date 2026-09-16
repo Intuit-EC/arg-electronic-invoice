@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddInvoiceSeriesSnapshot1772319000000
-  implements MigrationInterface
-{
+export class AddInvoiceSeriesSnapshot1772319000000 implements MigrationInterface {
   name = 'AddInvoiceSeriesSnapshot1772319000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
@@ -40,9 +38,7 @@ export class AddInvoiceSeriesSnapshot1772319000000
     await queryRunner.query(
       `CREATE UNIQUE INDEX "IDX_9e36afac433c2697cf6a8fddd1" ON "invoice" ("issuerId", "secuencial") `,
     );
-    await queryRunner.query(
-      `ALTER TABLE "invoice" DROP COLUMN "puntoEmision"`,
-    );
+    await queryRunner.query(`ALTER TABLE "invoice" DROP COLUMN "puntoEmision"`);
     await queryRunner.query(
       `ALTER TABLE "invoice" DROP COLUMN "establecimiento"`,
     );

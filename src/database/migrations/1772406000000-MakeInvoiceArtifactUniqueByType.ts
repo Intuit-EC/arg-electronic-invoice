@@ -1,8 +1,6 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class MakeInvoiceArtifactUniqueByType1772406000000
-  implements MigrationInterface
-{
+export class MakeInvoiceArtifactUniqueByType1772406000000 implements MigrationInterface {
   name = 'MakeInvoiceArtifactUniqueByType1772406000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {

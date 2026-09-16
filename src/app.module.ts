@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import configuration from './config/configuration';
 import { validationSchema } from './config/validation.schema';
@@ -17,6 +18,7 @@ import { XmlBuilderModule } from './modules/xml-builder/xml-builder.module';
 import { SignatureModule } from './modules/signature/signature.module';
 import { StorageModule } from './modules/storage/storage.module';
 import { PdfGeneratorModule } from './modules/pdf-generator/pdf-generator.module';
+import { JobsModule } from './modules/jobs/jobs.module';
 
 @Module({
   imports: [
@@ -44,6 +46,7 @@ import { PdfGeneratorModule } from './modules/pdf-generator/pdf-generator.module
       }),
       inject: [ConfigService],
     }),
+    ScheduleModule.forRoot(),
     InvoiceModule,
     IssuerModule,
     CreditNoteModule,
@@ -55,6 +58,7 @@ import { PdfGeneratorModule } from './modules/pdf-generator/pdf-generator.module
     SignatureModule,
     StorageModule,
     PdfGeneratorModule,
+    JobsModule,
   ],
   controllers: [AppController],
   providers: [],

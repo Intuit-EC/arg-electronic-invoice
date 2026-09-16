@@ -3,7 +3,35 @@ import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { XMLParser } from 'fast-xml-parser';
-import * as https from 'https';
+import {
+  SriDefinitiveRejectionError,
+  SriDomainError,
+  SriTemporaryError,
+} from '../../shared/errors/sri.errors';
+
+export interface SriMessage {
+  identificador: string;
+  mensaje: string;
+  informacionAdicional: string;
+  tipo: string;
+}
+
+export interface SriReceptionResponse {
+  estado: string;
+  comprobantes: Array<{
+    claveAcceso: string;
+    mensajes: SriMessage[];
+  }>;
+}
+
+export interface SriAuthorizationResponse {
+  estado: 'AUTORIZADO' | 'NO AUTORIZADO' | 'EN PROCESO' | 'NO ENCONTRADO';
+  numeroAutorizacion: string | null;
+  fechaAutorizacion: string | null;
+  ambiente: string | null;
+  comprobante: string | null;
+  mensajes: SriMessage[];
+}
 
 @Injectable()
 export class SriService {
@@ -21,8 +49,14 @@ export class SriService {
       this.configService.get<string>('sri.receptionUrl') || '';
     this.authorizationUrl =
       this.configService.get<string>('sri.authorizationUrl') || '';
-    this.useMock =
-      this.configService.get<string>('app.nodeEnv') === 'development';
+    this.useMock = this.configService.get<boolean>('sri.useMock') === true;
+
+    if (
+      this.useMock &&
+      this.configService.get<string>('app.nodeEnv') === 'production'
+    ) {
+      throw new Error('SRI_USE_MOCK no puede habilitarse en producción');
+    }
 
     // Configurar parser XML para respuestas SOAP
     this.xmlParser = new XMLParser({
@@ -40,15 +74,24 @@ export class SriService {
   async sendToReception(data: {
     claveAcceso: string;
     xml: string;
-  }): Promise<any> {
+  }): Promise<SriReceptionResponse> {
     this.logger.log(
       `Enviando comprobante a recepción SRI: ${data.claveAcceso}`,
     );
 
     // Si está en modo desarrollo sin URL del SRI, usar mock
-    if (!this.receptionUrl || this.useMock) {
-      this.logger.warn('Usando respuesta MOCK para recepción (modo desarrollo)');
+    if (this.useMock) {
+      this.logger.warn(
+        'Usando respuesta MOCK para recepción (modo desarrollo)',
+      );
       return this.getMockReceptionResponse(data.claveAcceso);
+    }
+
+    if (!this.receptionUrl) {
+      throw new SriTemporaryError(
+        'No está configurada la URL de recepción del SRI',
+        'SRI_RECEPTION_URL_MISSING',
+      );
     }
 
     try {
@@ -74,13 +117,16 @@ export class SriService {
       this.logger.log(`Respuesta de recepción: ${parsedResponse.estado}`);
 
       return parsedResponse;
-    } catch (error) {
-      // Manejo de errores de conexión (Retry con Mock)
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        this.logger.warn(
-          `Error de conexión (${error.code}), usando respuesta MOCK`,
+    } catch (error: unknown) {
+      if (error instanceof SriDomainError) throw error;
+
+      if (this.isTemporaryNetworkError(error)) {
+        const code = this.getErrorCode(error) || 'SRI_NETWORK_ERROR';
+        throw new SriTemporaryError(
+          `Error temporal en recepción SRI (${code})`,
+          code,
+          { cause: error },
         );
-        return this.getMockReceptionResponse(data.claveAcceso);
       }
 
       // Intentar extraer error específico del SRI (SOAP Fault)
@@ -92,15 +138,24 @@ export class SriService {
           fault.includes('GenericJDBCException') ||
           fault.includes('Could not open connection')
         ) {
-          throw new Error('SRI INTERNO CAÍDO: Problema interno del servidor.');
+          throw new SriTemporaryError(
+            'El servicio interno del SRI no está disponible',
+            'SRI_INTERNAL_UNAVAILABLE',
+          );
         }
 
-        throw new Error(`SRI RECHAZÓ LA SOLICITUD: ${fault}`);
+        throw new SriDefinitiveRejectionError(
+          `El SRI rechazó la solicitud: ${fault}`,
+          'SRI_RECEPTION_FAULT',
+        );
       }
 
-      this.logger.error(`Error al enviar a recepción SRI: ${error.message}`);
-      throw new Error(
-        `Error en servicio de recepción del SRI: ${error.message}`,
+      const message = this.getErrorMessage(error);
+      this.logger.error(`Error al enviar a recepción SRI: ${message}`);
+      throw new SriTemporaryError(
+        `Error en servicio de recepción del SRI: ${message}`,
+        'SRI_RECEPTION_ERROR',
+        { cause: error },
       );
     }
   }
@@ -108,13 +163,24 @@ export class SriService {
   /**
    * Consultar autorización de comprobante en el SRI
    */
-  async checkAuthorization(claveAcceso: string): Promise<any> {
+  async checkAuthorization(
+    claveAcceso: string,
+  ): Promise<SriAuthorizationResponse> {
     this.logger.log(`Consultando autorización en SRI: ${claveAcceso}`);
 
     // Si está en modo desarrollo sin URL del SRI, usar mock
-    if (!this.authorizationUrl || this.useMock) {
-      this.logger.warn('Usando respuesta MOCK para autorización (modo desarrollo)');
+    if (this.useMock) {
+      this.logger.warn(
+        'Usando respuesta MOCK para autorización (modo desarrollo)',
+      );
       return this.getMockAuthorizationResponse(claveAcceso);
+    }
+
+    if (!this.authorizationUrl) {
+      throw new SriTemporaryError(
+        'No está configurada la URL de autorización del SRI',
+        'SRI_AUTHORIZATION_URL_MISSING',
+      );
     }
 
     try {
@@ -140,13 +206,16 @@ export class SriService {
       this.logger.log(`Estado de autorización: ${parsedResponse.estado}`);
 
       return parsedResponse;
-    } catch (error) {
-      // Manejo de errores de conexión (Retry con Mock)
-      if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
-        this.logger.warn(
-          `Error de conexión (${error.code}), usando respuesta MOCK`,
+    } catch (error: unknown) {
+      if (error instanceof SriDomainError) throw error;
+
+      if (this.isTemporaryNetworkError(error)) {
+        const code = this.getErrorCode(error) || 'SRI_NETWORK_ERROR';
+        throw new SriTemporaryError(
+          `Error temporal en autorización SRI (${code})`,
+          code,
+          { cause: error },
         );
-        return this.getMockAuthorizationResponse(claveAcceso);
       }
 
       // Intentar extraer error específico del SRI (SOAP Fault)
@@ -158,17 +227,24 @@ export class SriService {
           fault.includes('GenericJDBCException') ||
           fault.includes('Could not open connection')
         ) {
-          throw new Error('SRI INTERNO CAÍDO: problema interno del servidor.');
+          throw new SriTemporaryError(
+            'El servicio interno del SRI no está disponible',
+            'SRI_INTERNAL_UNAVAILABLE',
+          );
         }
 
-        throw new Error(`SRI RECHAZÓ AUTORIZACIÓN: ${fault}`);
+        throw new SriDefinitiveRejectionError(
+          `El SRI rechazó la consulta de autorización: ${fault}`,
+          'SRI_AUTHORIZATION_FAULT',
+        );
       }
 
-      this.logger.error(
-        `Error al consultar autorización SRI: ${error.message}`,
-      );
-      throw new Error(
-        `Error en servicio de autorización del SRI: ${error.message}`,
+      const message = this.getErrorMessage(error);
+      this.logger.error(`Error al consultar autorización SRI: ${message}`);
+      throw new SriTemporaryError(
+        `Error en servicio de autorización del SRI: ${message}`,
+        'SRI_AUTHORIZATION_ERROR',
+        { cause: error },
       );
     }
   }
@@ -265,7 +341,9 @@ export class SriService {
   /**
    * Parsear respuesta de autorización
    */
-  private parseAuthorizationResponse(soapResponse: string): any {
+  private parseAuthorizationResponse(
+    soapResponse: string,
+  ): SriAuthorizationResponse {
     try {
       const parsed = this.xmlParser.parse(soapResponse);
 
@@ -306,7 +384,14 @@ export class SriService {
       }
 
       if (!autorizacion) {
-        throw new Error('No se encontró autorización en la respuesta');
+        return {
+          estado: 'NO ENCONTRADO',
+          numeroAutorizacion: null,
+          fechaAutorizacion: null,
+          ambiente: null,
+          comprobante: null,
+          mensajes: [],
+        };
       }
 
       // Normalizar respuesta
@@ -384,7 +469,9 @@ export class SriService {
   /**
    * Obtener respuesta mock para recepción (desarrollo)
    */
-  private async getMockReceptionResponse(claveAcceso: string): Promise<any> {
+  private async getMockReceptionResponse(
+    claveAcceso: string,
+  ): Promise<SriReceptionResponse> {
     await this.simulateDelay(1000);
 
     return {
@@ -410,7 +497,7 @@ export class SriService {
    */
   private async getMockAuthorizationResponse(
     claveAcceso: string,
-  ): Promise<any> {
+  ): Promise<SriAuthorizationResponse> {
     await this.simulateDelay(2000);
 
     const fechaAutorizacion = new Date().toISOString();
@@ -430,6 +517,39 @@ export class SriService {
    */
   private async simulateDelay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private isTemporaryNetworkError(error: unknown): boolean {
+    const code = this.getErrorCode(error);
+    const status =
+      typeof error === 'object' && error !== null && 'response' in error
+        ? (error as { response?: { status?: number } }).response?.status
+        : undefined;
+
+    return (
+      [
+        'ECONNABORTED',
+        'ECONNREFUSED',
+        'ECONNRESET',
+        'ETIMEDOUT',
+        'ENOTFOUND',
+        'EAI_AGAIN',
+      ].includes(code || '') ||
+      status === 429 ||
+      (typeof status === 'number' && status >= 500)
+    );
+  }
+
+  private getErrorCode(error: unknown): string | undefined {
+    if (typeof error !== 'object' || error === null || !('code' in error)) {
+      return undefined;
+    }
+
+    return String((error as { code?: unknown }).code || '') || undefined;
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   /**
@@ -453,7 +573,7 @@ export class SriService {
       if (this.receptionUrl && !this.useMock) {
         const response = await firstValueFrom(
           this.httpService.get(this.receptionUrl.replace('?wsdl', ''), {
-            timeout: 5000
+            timeout: 5000,
           }),
         );
         result.reception = response.status === 200;

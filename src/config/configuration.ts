@@ -15,6 +15,7 @@ export default () => ({
   sri: {
     receptionUrl: process.env.SRI_WS_RECEPTION_URL,
     authorizationUrl: process.env.SRI_WS_AUTHORIZATION_URL,
+    useMock: process.env.SRI_USE_MOCK === 'true',
   },
   signature: {
     path: process.env.SIGNATURE_PATH,
@@ -67,5 +68,24 @@ export default () => ({
   },
   logging: {
     level: process.env.LOG_LEVEL || 'info',
+  },
+  jobs: {
+    batchSize: parseInt(process.env.JOBS_BATCH_SIZE || '10', 10),
+    leaseSeconds: parseInt(process.env.JOBS_LEASE_SECONDS || '300', 10),
+    retryBaseSeconds: parseInt(process.env.JOBS_RETRY_BASE_SECONDS || '30', 10),
+    retryMaxSeconds: parseInt(process.env.JOBS_RETRY_MAX_SECONDS || '900', 10),
+    callbackRetryMaxSeconds: parseInt(
+      process.env.CALLBACK_RETRY_MAX_SECONDS || '3600',
+      10,
+    ),
+    publicApiUrl: process.env.PUBLIC_API_URL || '',
+    apiKeys: {
+      zenntral: process.env.ZENNTRAL_API_KEY || '',
+      facturacionBca: process.env.FACTURACION_BCA_API_KEY || '',
+    },
+    webhookSecrets: {
+      zenntral: process.env.ZENNTRAL_WEBHOOK_SECRET || '',
+      facturacionBca: process.env.FACTURACION_BCA_WEBHOOK_SECRET || '',
+    },
   },
 });
