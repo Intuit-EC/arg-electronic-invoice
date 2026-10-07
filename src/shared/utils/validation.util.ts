@@ -1,29 +1,23 @@
 import { FIELD_LENGTHS } from '../constants/sri.constants';
 
 /**
- * Valida un RUC ecuatoriano
+ * Valida el formato de un RUC ecuatoriano (13 dígitos, tercer dígito y
+ * establecimiento válidos). No valida el dígito verificador: el SRI tiene
+ * RUC reales y activos (históricos/reasignados) que no satisfacen el
+ * checksum módulo-11 estándar, y ese checksum rechazaba RUC válidos.
  */
 export function validateRuc(ruc: string): boolean {
-  if (!ruc || ruc.length !== FIELD_LENGTHS.RUC) {
+  if (!ruc || ruc.length !== FIELD_LENGTHS.RUC || !/^\d{13}$/.test(ruc)) {
     return false;
   }
 
-  const coeficientes = [4, 3, 2, 7, 6, 5, 4, 3, 2];
   const tercerDigito = parseInt(ruc.charAt(2));
-
-  // Validación según el tercer dígito
-  if (tercerDigito < 6) {
-    // Persona natural o jurídica
-    return validateCedula(ruc.substring(0, 10));
-  } else if (tercerDigito === 6) {
-    // Entidad pública
-    return validatePublicEntity(ruc);
-  } else if (tercerDigito === 9) {
-    // Persona jurídica
-    return validateCompany(ruc);
+  if (tercerDigito > 6 && tercerDigito !== 9) {
+    return false;
   }
 
-  return false;
+  const establecimiento = parseInt(ruc.substring(10, 13));
+  return establecimiento >= 1;
 }
 
 /**
@@ -53,42 +47,6 @@ export function validateCedula(cedula: string): boolean {
   const digitoVerificador = parseInt(cedula.charAt(9));
   const resultado = suma % 10;
   const verificador = resultado === 0 ? 0 : 10 - resultado;
-
-  return verificador === digitoVerificador;
-}
-
-/**
- * Valida RUC de entidad pública
- */
-function validatePublicEntity(ruc: string): boolean {
-  const coeficientes = [3, 2, 7, 6, 5, 4, 3, 2];
-  let suma = 0;
-
-  for (let i = 0; i < 8; i++) {
-    suma += parseInt(ruc.charAt(i)) * coeficientes[i];
-  }
-
-  const digitoVerificador = parseInt(ruc.charAt(8));
-  const resultado = suma % 11;
-  const verificador = resultado === 0 ? 0 : 11 - resultado;
-
-  return verificador === digitoVerificador;
-}
-
-/**
- * Valida RUC de persona jurídica
- */
-function validateCompany(ruc: string): boolean {
-  const coeficientes = [4, 3, 2, 7, 6, 5, 4, 3, 2];
-  let suma = 0;
-
-  for (let i = 0; i < 9; i++) {
-    suma += parseInt(ruc.charAt(i)) * coeficientes[i];
-  }
-
-  const digitoVerificador = parseInt(ruc.charAt(9));
-  const resultado = suma % 11;
-  const verificador = resultado === 0 ? 0 : 11 - resultado;
 
   return verificador === digitoVerificador;
 }
